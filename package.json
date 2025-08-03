@@ -1,7 +1,7 @@
 {
   "name": "brainrot-backend",
   "version": "1.0.0",
-  "description": "Railway backend for Roblox Pet Finder Live Feed",
+  "description": "Backend for Roblox Pet Finder Live Feed",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
