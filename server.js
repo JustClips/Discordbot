@@ -4,10 +4,37 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Rate limiting - simple in-memory store
+const requestCounts = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const MAX_REQUESTS_PER_MINUTE = 30; // 30 requests per minute per IP
+
+function isRateLimited(ip) {
+    const now = Date.now();
+    const windowStart = now - RATE_LIMIT_WINDOW;
+    
+    if (!requestCounts.has(ip)) {
+        requestCounts.set(ip, []);
+    }
+    
+    const requests = requestCounts.get(ip);
+    // Remove old requests outside the window
+    const recentRequests = requests.filter(time => time > windowStart);
+    requestCounts.set(ip, recentRequests);
+    
+    if (recentRequests.length >= MAX_REQUESTS_PER_MINUTE) {
+        return true;
+    }
+    
+    // Add current request
+    recentRequests.push(now);
+    return false;
+}
+
 // Store: { "<serverId>_<name>_<jobId>": { name, serverId, jobId, lastSeen, active, lastIP, source } }
 const brainrots = {};
-const BRAINROT_LIVETIME_MS = 300 * 1000; // 5 minutes (reduced from 10)
-const HEARTBEAT_TIMEOUT_MS = 60 * 1000; // 60 seconds (increased from 10)
+const BRAINROT_LIVETIME_MS = 300 * 1000; // 5 minutes
+const HEARTBEAT_TIMEOUT_MS = 60 * 1000; // 60 seconds
 
 function now() {
   return Date.now();
@@ -41,6 +68,12 @@ function cleanupOldBrainrots() {
 
 // POST /brainrots - update or add a brainrot (heartbeat from client/discord bot)
 app.post('/brainrots', (req, res) => {
+  // Rate limiting check
+  if (isRateLimited(req.ip)) {
+    console.warn(`[${new Date().toISOString()}] Rate limited: ${req.ip}`);
+    return res.status(429).json({ error: "Too many requests. Please slow down." });
+  }
+
   let { name, serverId, jobId } = req.body;
 
   // Normalize input: force string and trim
@@ -58,6 +91,11 @@ app.post('/brainrots', (req, res) => {
   
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
   const isNewEntry = !brainrots[key];
+  
+  // Prevent spam - if same brainrot was updated less than 5 seconds ago, ignore
+  if (brainrots[key] && (now() - brainrots[key].lastSeen) < 5000) {
+    return res.json({ success: true, ignored: true });
+  }
   
   brainrots[key] = {
     name,
@@ -81,6 +119,12 @@ app.post('/brainrots', (req, res) => {
 
 // GET /brainrots - returns active brainrots
 app.get('/brainrots', (req, res) => {
+  // Rate limiting check for GET requests too
+  if (isRateLimited(req.ip)) {
+    console.warn(`[${new Date().toISOString()}] Rate limited GET: ${req.ip}`);
+    return res.status(429).json({ error: "Too many requests. Please slow down." });
+  }
+
   cleanupOldBrainrots();
   
   const activeBrainrots = Object.values(brainrots)
@@ -91,7 +135,7 @@ app.get('/brainrots', (req, res) => {
       jobId
     }));
   
-  console.log(`[${new Date().toISOString()}] GET /brainrots - returning ${activeBrainrots.length} active brainrots`);
+  console.log(`[${new Date().toISOString()}] GET /brainrots - returning ${activeBrainrots.length} active brainrots to ${req.ip}`);
   
   res.json(activeBrainrots);
 });
@@ -111,13 +155,12 @@ app.get('/brainrots/debug', (req, res) => {
       inactiveCount: inactive.length,
       lastCleanup: new Date().toISOString()
     },
-    active: active.map(br => ({
-      ...br,
-      secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000),
-      serverId: br.serverId.substring(0, 8) + '...',
-      jobId: br.jobId.substring(0, 8) + '...'
-    })),
-    inactive: inactive.map(br => ({
+    rateLimiting: {
+      activeIPs: requestCounts.size,
+      windowMinutes: RATE_LIMIT_WINDOW / 60000,
+      maxRequestsPerWindow: MAX_REQUESTS_PER_MINUTE
+    },
+    active: active.slice(0, 10).map(br => ({ // Only show first 10 to avoid spam
       ...br,
       secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000),
       serverId: br.serverId.substring(0, 8) + '...',
@@ -179,6 +222,7 @@ app.get('/', (req, res) => {
     <p><strong>Active Brainrots:</strong> ${activeCount}</p>
     <p><strong>Server Time:</strong> ${new Date().toISOString()}</p>
     <p><strong>Uptime:</strong> ${Math.floor(process.uptime())} seconds</p>
+    <p><strong>Rate Limit:</strong> ${MAX_REQUESTS_PER_MINUTE} requests/minute per IP</p>
     <hr>
     <p><a href="/brainrots">📊 View Active Brainrots</a></p>
     <p><a href="/brainrots/debug">🔍 Debug Data</a></p>
@@ -191,8 +235,22 @@ setInterval(() => {
   cleanupOldBrainrots();
 }, 30000);
 
+// Clear old rate limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  const cutoff = now - RATE_LIMIT_WINDOW;
+  for (const [ip, requests] of requestCounts.entries()) {
+    const recentRequests = requests.filter(time => time > cutoff);
+    if (recentRequests.length === 0) {
+      requestCounts.delete(ip);
+    } else {
+      requestCounts.set(ip, recentRequests);
+    }
+  }
+}, 5 * 60 * 1000);
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] 🚀 Brainrot Backend Server running on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] 📊 Heartbeat timeout: ${HEARTBEAT_TIMEOUT_MS/1000}s, Lifetime: ${BRAINROT_LIVETIME_MS/1000}s`);
+  console.log(`[${new Date().toISOString()}] 📊 Rate limit: ${MAX_REQUESTS_PER_MINUTE} requests/minute per IP`);
 });
