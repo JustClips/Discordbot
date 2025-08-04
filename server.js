@@ -6,8 +6,8 @@ app.use(express.json());
 
 // Store: { "<serverId>_<name>_<jobId>": { name, serverId, jobId, players, lastSeen, active, lastIP, source } }
 const brainrots = {};
-const BRAINROT_LIVETIME_MS = 180 * 1000; // 3 minutes
-const HEARTBEAT_TIMEOUT_MS = 120 * 1000; // 2 minutes
+const BRAINROT_LIVETIME_MS = 20 * 1000; // 20 seconds
+const HEARTBEAT_TIMEOUT_MS = 15 * 1000; // 15 seconds
 
 function now() {
   return Date.now();
@@ -18,10 +18,10 @@ function cleanupOldBrainrots() {
   const nowTime = now();
   const heartbeatCutoff = nowTime - HEARTBEAT_TIMEOUT_MS;
   const livetimeCutoff = nowTime - BRAINROT_LIVETIME_MS;
-  
+
   let markedInactive = 0;
   let deleted = 0;
-  
+
   for (const key in brainrots) {
     const br = brainrots[key];
     if (br.active && br.lastSeen < heartbeatCutoff) {
@@ -33,7 +33,7 @@ function cleanupOldBrainrots() {
       deleted++;
     }
   }
-  
+
   if (markedInactive > 0 || deleted > 0) {
     console.log(`[${new Date().toISOString()}] Cleanup: ${markedInactive} marked inactive, ${deleted} deleted`);
   }
@@ -56,15 +56,12 @@ app.post('/brainrots', (req, res) => {
 
   // Determine source based on IP or other factors
   const source = req.ip?.includes('railway') || req.headers['x-forwarded-for']?.includes('railway') ? 'discord-bot' : 'lua-script';
-  
+
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
   const isNewEntry = !brainrots[key];
-  
-  // Prevent spam - if same brainrot was updated less than 10 seconds ago, ignore
-  if (brainrots[key] && (now() - brainrots[key].lastSeen) < 10000) {
-    return res.json({ success: true, ignored: true });
-  }
-  
+
+  // No spam prevention: allow instant update always
+
   brainrots[key] = {
     name,
     serverId,
@@ -76,20 +73,20 @@ app.post('/brainrots', (req, res) => {
     source: source,
     firstSeen: brainrots[key]?.firstSeen || now()
   };
-  
+
   cleanupOldBrainrots();
-  
+
   const logPrefix = `[${new Date().toISOString()}]`;
   const status = isNewEntry ? '✅ NEW' : '🔄 UPDATE';
   console.log(`${logPrefix} ${status} Heartbeat (${source}):`, { name, serverId: serverId.substring(0, 8) + '...', jobId: jobId.substring(0, 8) + '...', players });
-  
+
   res.json({ success: true });
 });
 
 // GET /brainrots - returns active brainrots
 app.get('/brainrots', (req, res) => {
   cleanupOldBrainrots();
-  
+
   const activeBrainrots = Object.values(brainrots)
     .filter(br => br.active)
     .map(({ name, serverId, jobId, players }) => ({
@@ -98,20 +95,20 @@ app.get('/brainrots', (req, res) => {
       jobId,
       ...(players ? { players } : {})
     }));
-  
+
   console.log(`[${new Date().toISOString()}] GET /brainrots - returning ${activeBrainrots.length} active brainrots to ${req.ip}`);
-  
+
   res.json(activeBrainrots);
 });
 
 // GET /brainrots/debug - debug endpoint to see all data
 app.get('/brainrots/debug', (req, res) => {
   cleanupOldBrainrots();
-  
+
   const totalStored = Object.keys(brainrots).length;
   const active = Object.values(brainrots).filter(br => br.active);
   const inactive = Object.values(brainrots).filter(br => !br.active);
-  
+
   const debugData = {
     summary: {
       totalStored,
@@ -126,25 +123,25 @@ app.get('/brainrots/debug', (req, res) => {
       jobId: br.jobId.substring(0, 8) + '...'
     }))
   };
-  
+
   res.json(debugData);
 });
 
 // GET /brainrots/stats - simple stats endpoint
 app.get('/brainrots/stats', (req, res) => {
   cleanupOldBrainrots();
-  
+
   const active = Object.values(brainrots).filter(br => br.active);
   const bySource = active.reduce((acc, br) => {
     acc[br.source] = (acc[br.source] || 0) + 1;
     return acc;
   }, {});
-  
+
   res.json({
     totalActive: active.length,
     bySource,
     uptime: process.uptime(),
-    lastUpdate: Math.max(...active.map(br => br.lastSeen))
+    lastUpdate: Math.max(0, ...active.map(br => br.lastSeen))
   });
 });
 
@@ -162,14 +159,14 @@ app.patch('/brainrots/leave', (req, res) => {
   name = typeof name === "string" ? name.trim() : "";
   serverId = typeof serverId === "string" ? serverId.trim() : "";
   jobId = typeof jobId === "string" ? jobId.trim() : "";
-  
+
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
   if (brainrots[key]) {
     brainrots[key].active = false;
     brainrots[key].lastSeen = now();
     console.log(`[${new Date().toISOString()}] 👋 Marked inactive: ${name} from ${req.ip}`);
   }
-  
+
   res.json({ success: true });
 });
 
@@ -188,13 +185,13 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Cleanup task every 30 seconds
+// Cleanup task every 5 seconds for snappier removal
 setInterval(() => {
   cleanupOldBrainrots();
-}, 30000);
+}, 5000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] 🚀 Brainrot Backend Server running on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] 📊 No rate limiting - accepting all requests`);
+  console.log(`[${new Date().toISOString()}] ⏱️ Entries expire after 20 seconds`);
 });
