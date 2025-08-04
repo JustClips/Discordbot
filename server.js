@@ -4,7 +4,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Store: { "<serverId>_<name>_<jobId>": { name, serverId, jobId, lastSeen, active, lastIP, source } }
+// Store: { "<serverId>_<name>_<jobId>": { name, serverId, jobId, players, lastSeen, active, lastIP, source } }
 const brainrots = {};
 const BRAINROT_LIVETIME_MS = 180 * 1000; // 3 minutes
 const HEARTBEAT_TIMEOUT_MS = 120 * 1000; // 2 minutes
@@ -41,12 +41,13 @@ function cleanupOldBrainrots() {
 
 // POST /brainrots - update or add a brainrot (heartbeat from client/discord bot)
 app.post('/brainrots', (req, res) => {
-  let { name, serverId, jobId } = req.body;
+  let { name, serverId, jobId, players } = req.body;
 
   // Normalize input: force string and trim
   name = typeof name === "string" ? name.trim() : "";
   serverId = typeof serverId === "string" ? serverId.trim() : "";
   jobId = typeof jobId === "string" ? jobId.trim() : "";
+  players = typeof players === "string" ? players.trim() : undefined;
 
   if (!name || !serverId || !jobId) {
     console.warn(`[${new Date().toISOString()}] Bad /brainrots POST from ${req.ip}:`, req.body);
@@ -68,6 +69,7 @@ app.post('/brainrots', (req, res) => {
     name,
     serverId,
     jobId,
+    players, // Store players field if present
     lastSeen: now(),
     active: true,
     lastIP: req.ip,
@@ -79,7 +81,7 @@ app.post('/brainrots', (req, res) => {
   
   const logPrefix = `[${new Date().toISOString()}]`;
   const status = isNewEntry ? '✅ NEW' : '🔄 UPDATE';
-  console.log(`${logPrefix} ${status} Heartbeat (${source}):`, { name, serverId: serverId.substring(0, 8) + '...', jobId: jobId.substring(0, 8) + '...' });
+  console.log(`${logPrefix} ${status} Heartbeat (${source}):`, { name, serverId: serverId.substring(0, 8) + '...', jobId: jobId.substring(0, 8) + '...', players });
   
   res.json({ success: true });
 });
@@ -90,10 +92,11 @@ app.get('/brainrots', (req, res) => {
   
   const activeBrainrots = Object.values(brainrots)
     .filter(br => br.active)
-    .map(({ name, serverId, jobId }) => ({
+    .map(({ name, serverId, jobId, players }) => ({
       name,
       serverId,
-      jobId
+      jobId,
+      ...(players ? { players } : {})
     }));
   
   console.log(`[${new Date().toISOString()}] GET /brainrots - returning ${activeBrainrots.length} active brainrots to ${req.ip}`);
