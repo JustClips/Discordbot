@@ -4,7 +4,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Store: { "<serverId>_<name>_<jobId>": { name, serverId, jobId, players, lastSeen, active, lastIP, source } }
+// Store: { "<serverId>_<name>_<jobId>": { ...all fields sent by client..., lastSeen, active, lastIP, source, firstSeen } }
 const brainrots = {};
 const BRAINROT_LIVETIME_MS = 20 * 1000; // 20 seconds
 const HEARTBEAT_TIMEOUT_MS = 15 * 1000; // 15 seconds
@@ -41,13 +41,12 @@ function cleanupOldBrainrots() {
 
 // POST /brainrots - update or add a brainrot (heartbeat from client/discord bot)
 app.post('/brainrots', (req, res) => {
-  let { name, serverId, jobId, players } = req.body;
+  const data = req.body;
 
-  // Normalize input: force string and trim
-  name = typeof name === "string" ? name.trim() : "";
-  serverId = typeof serverId === "string" ? serverId.trim() : "";
-  jobId = typeof jobId === "string" ? jobId.trim() : "";
-  players = typeof players === "string" ? players.trim() : undefined;
+  // Always require these three (mandatory)
+  let name = typeof data.name === "string" ? data.name.trim() : "";
+  let serverId = typeof data.serverId === "string" ? data.serverId.trim() : "";
+  let jobId = typeof data.jobId === "string" ? data.jobId.trim() : "";
 
   if (!name || !serverId || !jobId) {
     console.warn(`[${new Date().toISOString()}] Bad /brainrots POST from ${req.ip}:`, req.body);
@@ -56,29 +55,29 @@ app.post('/brainrots', (req, res) => {
 
   // Determine source based on IP or other factors
   const source = req.ip?.includes('railway') || req.headers['x-forwarded-for']?.includes('railway') ? 'discord-bot' : 'lua-script';
-
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
   const isNewEntry = !brainrots[key];
 
-  // No spam prevention: allow instant update always
+  // Copy all fields from the incoming data
+  const entry = { ...data };
 
-  brainrots[key] = {
-    name,
-    serverId,
-    jobId,
-    players, // Store players field if present
-    lastSeen: now(),
-    active: true,
-    lastIP: req.ip,
-    source: source,
-    firstSeen: brainrots[key]?.firstSeen || now()
-  };
+  // Add/overwrite backend-specific fields
+  entry.name = name;
+  entry.serverId = serverId;
+  entry.jobId = jobId;
+  entry.lastSeen = now();
+  entry.active = true;
+  entry.lastIP = req.ip;
+  entry.source = source;
+  entry.firstSeen = brainrots[key]?.firstSeen || now();
+
+  brainrots[key] = entry;
 
   cleanupOldBrainrots();
 
   const logPrefix = `[${new Date().toISOString()}]`;
   const status = isNewEntry ? '✅ NEW' : '🔄 UPDATE';
-  console.log(`${logPrefix} ${status} Heartbeat (${source}):`, { name, serverId: serverId.substring(0, 8) + '...', jobId: jobId.substring(0, 8) + '...', players });
+  console.log(`${logPrefix} ${status} Heartbeat (${source}):`, { name, serverId: serverId.substring(0, 8) + '...', jobId: jobId.substring(0, 8) + '...', players: entry.players });
 
   res.json({ success: true });
 });
@@ -89,12 +88,11 @@ app.get('/brainrots', (req, res) => {
 
   const activeBrainrots = Object.values(brainrots)
     .filter(br => br.active)
-    .map(({ name, serverId, jobId, players }) => ({
-      name,
-      serverId,
-      jobId,
-      ...(players ? { players } : {})
-    }));
+    .map(br => {
+      // Optionally exclude lastIP for privacy
+      const { lastIP, ...rest } = br;
+      return rest;
+    });
 
   console.log(`[${new Date().toISOString()}] GET /brainrots - returning ${activeBrainrots.length} active brainrots to ${req.ip}`);
 
@@ -116,7 +114,7 @@ app.get('/brainrots/debug', (req, res) => {
       inactiveCount: inactive.length,
       lastCleanup: new Date().toISOString()
     },
-    active: active.slice(0, 20).map(br => ({ // Show first 20
+    active: active.slice(0, 20).map(br => ({
       ...br,
       secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000),
       serverId: br.serverId.substring(0, 8) + '...',
