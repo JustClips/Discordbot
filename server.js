@@ -6,8 +6,8 @@ app.use(express.json());
 
 // Store: { "<serverId>_<name>_<jobId>": { ...all fields sent by client..., lastSeen, active, lastIP, source, firstSeen } }
 const brainrots = {};
-const BRAINROT_LIVETIME_MS = 20 * 1000; // 20 seconds
-const HEARTBEAT_TIMEOUT_MS = 15 * 1000; // 15 seconds
+const BRAINROT_LIVETIME_MS = 10 * 1000; // 10 seconds (changed from 20)
+const HEARTBEAT_TIMEOUT_MS = 7 * 1000;  // 7 seconds (changed from 15)
 
 function now() {
   return Date.now();
@@ -183,13 +183,13 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Cleanup task every 5 seconds for snappier removal
+// Cleanup task every 2 seconds for snappier removal
 setInterval(() => {
   cleanupOldBrainrots();
-}, 5000);
+}, 2000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] 🚀 Brainrot Backend Server running on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] ⏱️ Entries expire after 20 seconds`);
+  console.log(`[${new Date().toISOString()}] ⏱️ Entries expire after 10 seconds`);
 });
