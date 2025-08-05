@@ -6,8 +6,8 @@ app.use(express.json());
 
 // Store: { "<serverId>_<name>_<jobId>": { ...all fields sent by client..., lastSeen, active, lastIP, source, firstSeen } }
 const brainrots = {};
-const BRAINROT_LIVETIME_MS = 10 * 4000; // 10 seconds (changed from 20)
-const HEARTBEAT_TIMEOUT_MS = 11 * 1000;  // 7 seconds (changed from 15)
+const BRAINROT_LIVETIME_MS = 35 * 1000; // 10 seconds (changed from 20)
+const HEARTBEAT_TIMEOUT_MS = 30 * 1000;  // 7 seconds (changed from 15)
 
 function now() {
   return Date.now();
