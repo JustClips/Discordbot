@@ -9,25 +9,8 @@ const brainrots = {};
 const BRAINROT_LIVETIME_MS = 35 * 1000; // 10 seconds (changed from 20)
 const HEARTBEAT_TIMEOUT_MS = 30 * 1000;  // 7 seconds (changed from 15)
 
-// Force join commands storage
-const forceJoinCommands = {};
-const FORCE_JOIN_EXPIRE_MS = 60 * 1000; // Commands expire after 60 seconds
-
 function now() {
   return Date.now();
-}
-
-// Cleanup force join commands
-function cleanupForceJoinCommands() {
-  const nowTime = now();
-  const cutoff = nowTime - FORCE_JOIN_EXPIRE_MS;
-  
-  for (const username in forceJoinCommands) {
-    if (forceJoinCommands[username].timestamp < cutoff) {
-      delete forceJoinCommands[username];
-      console.log(`[${new Date().toISOString()}] Expired force-join command for ${username}`);
-    }
-  }
 }
 
 // Cleanup: mark stale active as inactive, delete old inactive
@@ -55,92 +38,6 @@ function cleanupOldBrainrots() {
     console.log(`[${new Date().toISOString()}] Cleanup: ${markedInactive} marked inactive, ${deleted} deleted`);
   }
 }
-
-// POST /forcejoin - Add a force join command for specific users
-app.post('/forcejoin', (req, res) => {
-  const { targetUsernames, placeId, jobId, issuer } = req.body;
-  
-  if (!targetUsernames || !placeId || !jobId) {
-    return res.status(400).json({ error: "Missing targetUsernames, placeId, or jobId" });
-  }
-  
-  const usernames = Array.isArray(targetUsernames) ? targetUsernames : [targetUsernames];
-  
-  usernames.forEach(username => {
-    const user = username.toLowerCase().trim();
-    forceJoinCommands[user] = {
-      placeId: String(placeId),
-      jobId: String(jobId),
-      timestamp: now(),
-      issuer: issuer || 'admin',
-      executed: false
-    };
-  });
-  
-  cleanupForceJoinCommands();
-  
-  console.log(`[${new Date().toISOString()}] Force-join command added for ${usernames.join(', ')} to ${placeId}:${jobId.substring(0, 8)}... by ${issuer || 'admin'}`);
-  
-  res.json({ 
-    success: true, 
-    message: `Force-join command added for ${usernames.length} user(s)`,
-    expires: new Date(now() + FORCE_JOIN_EXPIRE_MS).toISOString()
-  });
-});
-
-// GET /forcejoin/:username - Check if a user has a pending force-join command
-app.get('/forcejoin/:username', (req, res) => {
-  cleanupForceJoinCommands();
-  
-  const username = req.params.username.toLowerCase().trim();
-  const command = forceJoinCommands[username];
-  
-  if (command && !command.executed) {
-    // Mark as executed so it won't be sent again
-    command.executed = true;
-    command.executedAt = now();
-    
-    console.log(`[${new Date().toISOString()}] Force-join command retrieved for ${username}`);
-    
-    res.json({
-      hasCommand: true,
-      placeId: command.placeId,
-      jobId: command.jobId,
-      issuer: command.issuer
-    });
-  } else {
-    res.json({ hasCommand: false });
-  }
-});
-
-// GET /forcejoin/status - See all pending force-join commands (admin)
-app.get('/forcejoin/status', (req, res) => {
-  cleanupForceJoinCommands();
-  
-  const commands = Object.entries(forceJoinCommands).map(([username, cmd]) => ({
-    username,
-    ...cmd,
-    secondsRemaining: Math.max(0, Math.floor((FORCE_JOIN_EXPIRE_MS - (now() - cmd.timestamp)) / 1000))
-  }));
-  
-  res.json({
-    total: commands.length,
-    commands
-  });
-});
-
-// DELETE /forcejoin/:username - Cancel a force-join command
-app.delete('/forcejoin/:username', (req, res) => {
-  const username = req.params.username.toLowerCase().trim();
-  
-  if (forceJoinCommands[username]) {
-    delete forceJoinCommands[username];
-    console.log(`[${new Date().toISOString()}] Force-join command cancelled for ${username}`);
-    res.json({ success: true, message: `Command cancelled for ${username}` });
-  } else {
-    res.status(404).json({ error: `No command found for ${username}` });
-  }
-});
 
 // POST /brainrots - update or add a brainrot (heartbeat from client/discord bot)
 app.post('/brainrots', (req, res) => {
@@ -223,7 +120,7 @@ app.get('/brainrots/debug', (req, res) => {
       serverId: br.serverId.substring(0, 8) + '...',
       jobId: br.jobId.substring(0, 8) + '...'
     }))
-  });
+  };
 
   res.json(debugData);
 });
@@ -274,31 +171,25 @@ app.patch('/brainrots/leave', (req, res) => {
 // Health check
 app.get('/', (req, res) => {
   const activeCount = Object.values(brainrots).filter(br => br.active).length;
-  const pendingForceJoins = Object.keys(forceJoinCommands).length;
-  
   res.send(`
     <h1>🧠 Brainrot Backend is Running!</h1>
     <p><strong>Active Brainrots:</strong> ${activeCount}</p>
-    <p><strong>Pending Force-Joins:</strong> ${pendingForceJoins}</p>
     <p><strong>Server Time:</strong> ${new Date().toISOString()}</p>
     <p><strong>Uptime:</strong> ${Math.floor(process.uptime())} seconds</p>
     <hr>
     <p><a href="/brainrots">📊 View Active Brainrots</a></p>
     <p><a href="/brainrots/debug">🔍 Debug Data</a></p>
     <p><a href="/brainrots/stats">📈 Statistics</a></p>
-    <p><a href="/forcejoin/status">🎯 Force-Join Status</a></p>
   `);
 });
 
 // Cleanup task every 2 seconds for snappier removal
 setInterval(() => {
   cleanupOldBrainrots();
-  cleanupForceJoinCommands();
 }, 2000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] 🚀 Brainrot Backend Server running on port ${PORT}`);
   console.log(`[${new Date().toISOString()}] ⏱️ Entries expire after 10 seconds`);
-  console.log(`[${new Date().toISOString()}] 🎯 Force-join commands expire after 60 seconds`);
 });
