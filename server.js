@@ -2,39 +2,128 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '512kb' })); // Reduced request size limit
 
-// Store: { "<serverId>_<name>_<jobId>": { ...all fields sent by client..., lastSeen, active, lastIP, source, firstSeen } }
-const brainrots = {};
+// Strict memory limits to prevent overload
+const MAX_BRAINROTS = 300;    // Reduced from unlimited to 300
+const MAX_PLAYERS = 150;      // Reduced from unlimited to 150
+const MAX_FORCE_JOINS = 30;   // Reduced from unlimited to 30
+
+// Use Maps for better performance and memory efficiency
+const brainrots = new Map();
+const activePlayers = new Map();
+const forceJoinCommands = new Map();
+
+// Keep your original timeouts
 const BRAINROT_LIVETIME_MS = 35 * 1000; // 35 seconds
-const HEARTBEAT_TIMEOUT_MS = 30 * 1000;  // 30 seconds
-
-// Active players storage
-const activePlayers = {};
-const PLAYER_TIMEOUT_MS = 30 * 1000; // Players expire after 30 seconds of no heartbeat
-
-// Force join commands storage
-const forceJoinCommands = {};
-const FORCE_JOIN_EXPIRE_MS = 60 * 1000; // Commands expire after 60 seconds
+const HEARTBEAT_TIMEOUT_MS = 30 * 1000; // 30 seconds
+const PLAYER_TIMEOUT_MS = 30 * 1000;    // 30 seconds
+const FORCE_JOIN_EXPIRE_MS = 60 * 1000; // 60 seconds
 
 function now() {
   return Date.now();
 }
 
-// Cleanup inactive players
+// Optimized cleanup with size enforcement
 function cleanupInactivePlayers() {
   const nowTime = now();
   const cutoff = nowTime - PLAYER_TIMEOUT_MS;
   
-  for (const key in activePlayers) {
-    if (activePlayers[key].lastSeen < cutoff) {
-      console.log(`[${new Date().toISOString()}] Player timeout: ${activePlayers[key].username}`);
-      delete activePlayers[key];
+  // Remove expired players
+  let expired = 0;
+  for (const [key, player] of activePlayers) {
+    if (player.lastSeen < cutoff) {
+      activePlayers.delete(key);
+      expired++;
+    }
+  }
+  
+  // Enforce size limit - remove oldest if over limit
+  if (activePlayers.size > MAX_PLAYERS) {
+    const sorted = Array.from(activePlayers.entries())
+      .sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+    
+    const toRemove = activePlayers.size - MAX_PLAYERS;
+    for (let i = 0; i < toRemove; i++) {
+      activePlayers.delete(sorted[i][0]);
+    }
+  }
+  
+  if (expired > 0) {
+    console.log(`[${new Date().toISOString()}] Player cleanup: ${expired} expired, ${activePlayers.size} remaining`);
+  }
+}
+
+// Optimized brainrot cleanup with strict limits
+function cleanupOldBrainrots() {
+  const nowTime = now();
+  const heartbeatCutoff = nowTime - HEARTBEAT_TIMEOUT_MS;
+  const livetimeCutoff = nowTime - BRAINROT_LIVETIME_MS;
+
+  let markedInactive = 0;
+  let deleted = 0;
+
+  // Mark inactive and delete expired
+  for (const [key, br] of brainrots) {
+    if (br.active && br.lastSeen < heartbeatCutoff) {
+      br.active = false;
+      markedInactive++;
+    }
+    if (!br.active && br.lastSeen < livetimeCutoff) {
+      brainrots.delete(key);
+      deleted++;
+    }
+  }
+
+  // Enforce strict size limit
+  if (brainrots.size > MAX_BRAINROTS) {
+    const sorted = Array.from(brainrots.entries())
+      .sort((a, b) => {
+        // Prioritize removing inactive first, then oldest
+        if (a[1].active !== b[1].active) {
+          return a[1].active ? 1 : -1;
+        }
+        return a[1].lastSeen - b[1].lastSeen;
+      });
+    
+    const toRemove = brainrots.size - MAX_BRAINROTS;
+    for (let i = 0; i < toRemove; i++) {
+      brainrots.delete(sorted[i][0]);
+      deleted++;
+    }
+  }
+
+  if (markedInactive > 0 || deleted > 0) {
+    console.log(`[${new Date().toISOString()}] Brainrot cleanup: ${markedInactive} inactive, ${deleted} deleted, ${brainrots.size}/${MAX_BRAINROTS} remaining`);
+  }
+}
+
+// Optimized force join cleanup
+function cleanupForceJoinCommands() {
+  const nowTime = now();
+  const cutoff = nowTime - FORCE_JOIN_EXPIRE_MS;
+  
+  let expired = 0;
+  for (const [username, cmd] of forceJoinCommands) {
+    if (cmd.timestamp < cutoff) {
+      forceJoinCommands.delete(username);
+      expired++;
+    }
+  }
+  
+  // Enforce size limit
+  if (forceJoinCommands.size > MAX_FORCE_JOINS) {
+    const sorted = Array.from(forceJoinCommands.entries())
+      .sort((a, b) => a[1].timestamp - b[1].timestamp);
+    
+    const toRemove = forceJoinCommands.size - MAX_FORCE_JOINS;
+    for (let i = 0; i < toRemove; i++) {
+      forceJoinCommands.delete(sorted[i][0]);
     }
   }
 }
 
-// POST /players/heartbeat - Register/update player presence
+// Minimal player heartbeat - store only essential data
 app.post('/players/heartbeat', (req, res) => {
   const { username, serverId, jobId, placeId } = req.body;
   
@@ -44,27 +133,25 @@ app.post('/players/heartbeat', (req, res) => {
   
   const key = `${username.toLowerCase()}_${serverId}_${jobId}`;
   
-  activePlayers[key] = {
+  // Store minimal data only
+  activePlayers.set(key, {
     username: username,
     serverId: serverId,
     jobId: jobId,
     placeId: placeId || serverId,
-    lastSeen: now(),
-    ip: req.ip
-  };
+    lastSeen: now()
+  });
   
   cleanupInactivePlayers();
-  
-  console.log(`[${new Date().toISOString()}] Player heartbeat: ${username} in ${serverId.substring(0, 8)}...`);
   
   res.json({ success: true });
 });
 
-// GET /players/active - Get all active players
+// Lightweight active players endpoint
 app.get('/players/active', (req, res) => {
   cleanupInactivePlayers();
   
-  const players = Object.values(activePlayers).map(player => ({
+  const players = Array.from(activePlayers.values()).map(player => ({
     username: player.username,
     serverId: player.serverId,
     jobId: player.jobId,
@@ -72,51 +159,10 @@ app.get('/players/active', (req, res) => {
     secondsSinceLastSeen: Math.floor((now() - player.lastSeen) / 1000)
   }));
   
-  console.log(`[${new Date().toISOString()}] GET /players/active - returning ${players.length} active players to ${req.ip}`);
-  
   res.json(players);
 });
 
-// Cleanup force join commands
-function cleanupForceJoinCommands() {
-  const nowTime = now();
-  const cutoff = nowTime - FORCE_JOIN_EXPIRE_MS;
-  
-  for (const username in forceJoinCommands) {
-    if (forceJoinCommands[username].timestamp < cutoff) {
-      delete forceJoinCommands[username];
-      console.log(`[${new Date().toISOString()}] Expired force-join command for ${username}`);
-    }
-  }
-}
-
-// Cleanup: mark stale active as inactive, delete old inactive
-function cleanupOldBrainrots() {
-  const nowTime = now();
-  const heartbeatCutoff = nowTime - HEARTBEAT_TIMEOUT_MS;
-  const livetimeCutoff = nowTime - BRAINROT_LIVETIME_MS;
-
-  let markedInactive = 0;
-  let deleted = 0;
-
-  for (const key in brainrots) {
-    const br = brainrots[key];
-    if (br.active && br.lastSeen < heartbeatCutoff) {
-      br.active = false;
-      markedInactive++;
-    }
-    if (!br.active && br.lastSeen < livetimeCutoff) {
-      delete brainrots[key];
-      deleted++;
-    }
-  }
-
-  if (markedInactive > 0 || deleted > 0) {
-    console.log(`[${new Date().toISOString()}] Cleanup: ${markedInactive} marked inactive, ${deleted} deleted`);
-  }
-}
-
-// POST /forcejoin - Add a force join command for specific users
+// Optimized force join - minimal storage
 app.post('/forcejoin', (req, res) => {
   const { targetUsernames, placeId, jobId, issuer } = req.body;
   
@@ -128,18 +174,16 @@ app.post('/forcejoin', (req, res) => {
   
   usernames.forEach(username => {
     const user = username.toLowerCase().trim();
-    forceJoinCommands[user] = {
+    forceJoinCommands.set(user, {
       placeId: String(placeId),
       jobId: String(jobId),
       timestamp: now(),
       issuer: issuer || 'admin',
       executed: false
-    };
+    });
   });
   
   cleanupForceJoinCommands();
-  
-  console.log(`[${new Date().toISOString()}] Force-join command added for ${usernames.join(', ')} to ${placeId}:${jobId.substring(0, 8)}... by ${issuer || 'admin'}`);
   
   res.json({ 
     success: true, 
@@ -148,19 +192,15 @@ app.post('/forcejoin', (req, res) => {
   });
 });
 
-// GET /forcejoin/:username - Check if a user has a pending force-join command
 app.get('/forcejoin/:username', (req, res) => {
   cleanupForceJoinCommands();
   
   const username = req.params.username.toLowerCase().trim();
-  const command = forceJoinCommands[username];
+  const command = forceJoinCommands.get(username);
   
   if (command && !command.executed) {
-    // Mark as executed so it won't be sent again
     command.executed = true;
     command.executedAt = now();
-    
-    console.log(`[${new Date().toISOString()}] Force-join command retrieved for ${username}`);
     
     res.json({
       hasCommand: true,
@@ -173,11 +213,10 @@ app.get('/forcejoin/:username', (req, res) => {
   }
 });
 
-// GET /forcejoin/status - See all pending force-join commands (admin)
 app.get('/forcejoin/status', (req, res) => {
   cleanupForceJoinCommands();
   
-  const commands = Object.entries(forceJoinCommands).map(([username, cmd]) => ({
+  const commands = Array.from(forceJoinCommands.entries()).map(([username, cmd]) => ({
     username,
     ...cmd,
     secondsRemaining: Math.max(0, Math.floor((FORCE_JOIN_EXPIRE_MS - (now() - cmd.timestamp)) / 1000))
@@ -189,110 +228,105 @@ app.get('/forcejoin/status', (req, res) => {
   });
 });
 
-// DELETE /forcejoin/:username - Cancel a force-join command
 app.delete('/forcejoin/:username', (req, res) => {
   const username = req.params.username.toLowerCase().trim();
   
-  if (forceJoinCommands[username]) {
-    delete forceJoinCommands[username];
-    console.log(`[${new Date().toISOString()}] Force-join command cancelled for ${username}`);
+  if (forceJoinCommands.has(username)) {
+    forceJoinCommands.delete(username);
     res.json({ success: true, message: `Command cancelled for ${username}` });
   } else {
     res.status(404).json({ error: `No command found for ${username}` });
   }
 });
 
-// POST /brainrots - update or add a brainrot (heartbeat from client/discord bot)
+// Optimized brainrots endpoint - store only essential data
 app.post('/brainrots', (req, res) => {
   const data = req.body;
 
-  // Always require these three (mandatory)
   let name = typeof data.name === "string" ? data.name.trim() : "";
   let serverId = typeof data.serverId === "string" ? data.serverId.trim() : "";
   let jobId = typeof data.jobId === "string" ? data.jobId.trim() : "";
 
   if (!name || !serverId || !jobId) {
-    console.warn(`[${new Date().toISOString()}] Bad /brainrots POST from ${req.ip}:`, req.body);
     return res.status(400).json({ error: "Missing name, serverId, or jobId" });
   }
 
-  // Determine source based on IP or other factors
   const source = req.ip?.includes('railway') || req.headers['x-forwarded-for']?.includes('railway') ? 'discord-bot' : 'lua-script';
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
-  const isNewEntry = !brainrots[key];
+  const existing = brainrots.get(key);
 
-  // Copy all fields from the incoming data
-  const entry = { ...data };
+  // Store only essential data to minimize memory usage
+  const entry = {
+    name: name,
+    serverId: serverId,
+    jobId: jobId,
+    players: data.players,
+    moneyPerSec: data.moneyPerSec,
+    lastSeen: now(),
+    active: true,
+    source: source,
+    firstSeen: existing?.firstSeen || now()
+  };
 
-  // Add/overwrite backend-specific fields
-  entry.name = name;
-  entry.serverId = serverId;
-  entry.jobId = jobId;
-  entry.lastSeen = now();
-  entry.active = true;
-  entry.lastIP = req.ip;
-  entry.source = source;
-  entry.firstSeen = brainrots[key]?.firstSeen || now();
-
-  brainrots[key] = entry;
-
+  brainrots.set(key, entry);
   cleanupOldBrainrots();
-
-  const logPrefix = `[${new Date().toISOString()}]`;
-  const status = isNewEntry ? '✅ NEW' : '🔄 UPDATE';
-  console.log(`${logPrefix} ${status} Heartbeat (${source}):`, { name, serverId: serverId.substring(0, 8) + '...', jobId: jobId.substring(0, 8) + '...', players: entry.players });
 
   res.json({ success: true });
 });
 
-// GET /brainrots - returns active brainrots
+// Lightweight brainrots getter
 app.get('/brainrots', (req, res) => {
   cleanupOldBrainrots();
 
-  const activeBrainrots = Object.values(brainrots)
+  const activeBrainrots = Array.from(brainrots.values())
     .filter(br => br.active)
-    .map(br => {
-      // Optionally exclude lastIP for privacy
-      const { lastIP, ...rest } = br;
-      return rest;
-    });
-
-  console.log(`[${new Date().toISOString()}] GET /brainrots - returning ${activeBrainrots.length} active brainrots to ${req.ip}`);
+    .map(br => ({
+      name: br.name,
+      serverId: br.serverId,
+      jobId: br.jobId,
+      players: br.players,
+      moneyPerSec: br.moneyPerSec,
+      lastSeen: br.lastSeen,
+      source: br.source
+    }));
 
   res.json(activeBrainrots);
 });
 
-// GET /brainrots/debug - debug endpoint to see all data
+// Minimal debug endpoint
 app.get('/brainrots/debug', (req, res) => {
   cleanupOldBrainrots();
 
-  const totalStored = Object.keys(brainrots).length;
-  const active = Object.values(brainrots).filter(br => br.active);
-  const inactive = Object.values(brainrots).filter(br => !br.active);
+  const active = Array.from(brainrots.values()).filter(br => br.active);
+  const inactive = Array.from(brainrots.values()).filter(br => !br.active);
 
   const debugData = {
     summary: {
-      totalStored,
+      totalStored: brainrots.size,
       activeCount: active.length,
       inactiveCount: inactive.length,
-      lastCleanup: new Date().toISOString()
+      limits: {
+        maxBrainrots: MAX_BRAINROTS,
+        maxPlayers: MAX_PLAYERS,
+        maxForceJoins: MAX_FORCE_JOINS
+      }
     },
-    active: active.slice(0, 20).map(br => ({
-      ...br,
-      secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000),
+    active: active.slice(0, 10).map(br => ({
+      name: br.name,
       serverId: br.serverId.substring(0, 8) + '...',
-      jobId: br.jobId.substring(0, 8) + '...'
+      jobId: br.jobId.substring(0, 8) + '...',
+      players: br.players,
+      moneyPerSec: br.moneyPerSec,
+      secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000)
     }))
   };
 
   res.json(debugData);
 });
 
-// GET /brainrots/stats - simple stats endpoint
+// Lightweight stats endpoint
 app.get('/brainrots/stats', (req, res) => {
-  cleanupOldBrainrots();
-
-  const active = Object.values(brainrots).filter(br => br.active);
+  const active = Array.from(brainrots.values()).filter(br => br.active);
   const bySource = active.reduce((acc, br) => {
     acc[br.source] = (acc[br.source] || 0) + 1;
     return acc;
@@ -300,21 +334,25 @@ app.get('/brainrots/stats', (req, res) => {
 
   res.json({
     totalActive: active.length,
+    totalPlayers: activePlayers.size,
+    totalForceJoins: forceJoinCommands.size,
     bySource,
-    uptime: process.uptime(),
-    lastUpdate: Math.max(0, ...active.map(br => br.lastSeen))
+    uptime: Math.floor(process.uptime()),
+    limits: {
+      brainrots: `${brainrots.size}/${MAX_BRAINROTS}`,
+      players: `${activePlayers.size}/${MAX_PLAYERS}`,
+      forceJoins: `${forceJoinCommands.size}/${MAX_FORCE_JOINS}`
+    }
   });
 });
 
-// DELETE /brainrots - clear all (admin/testing)
+// Admin cleanup endpoints
 app.delete('/brainrots', (req, res) => {
-  const count = Object.keys(brainrots).length;
-  for (const key in brainrots) delete brainrots[key];
-  console.log(`[${new Date().toISOString()}] 🗑️ Admin cleared ${count} brainrots from ${req.ip}`);
+  const count = brainrots.size;
+  brainrots.clear();
   res.json({ success: true, cleared: count });
 });
 
-// PATCH /brainrots/leave - mark as inactive (call this on player leave or pet despawn)
 app.patch('/brainrots/leave', (req, res) => {
   let { name, serverId, jobId } = req.body;
   name = typeof name === "string" ? name.trim() : "";
@@ -322,27 +360,25 @@ app.patch('/brainrots/leave', (req, res) => {
   jobId = typeof jobId === "string" ? jobId.trim() : "";
 
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
-  if (brainrots[key]) {
-    brainrots[key].active = false;
-    brainrots[key].lastSeen = now();
-    console.log(`[${new Date().toISOString()}] 👋 Marked inactive: ${name} from ${req.ip}`);
+  const entry = brainrots.get(key);
+  
+  if (entry) {
+    entry.active = false;
+    entry.lastSeen = now();
   }
 
   res.json({ success: true });
 });
 
-// Health check
+// Minimal health check
 app.get('/', (req, res) => {
-  const activeCount = Object.values(brainrots).filter(br => br.active).length;
-  const activePlayerCount = Object.keys(activePlayers).length;
-  const pendingForceJoins = Object.keys(forceJoinCommands).length;
+  const activeCount = Array.from(brainrots.values()).filter(br => br.active).length;
   
   res.send(`
-    <h1>🧠 Brainrot Backend is Running!</h1>
-    <p><strong>Active Brainrots:</strong> ${activeCount}</p>
-    <p><strong>Active Players:</strong> ${activePlayerCount}</p>
-    <p><strong>Pending Force-Joins:</strong> ${pendingForceJoins}</p>
-    <p><strong>Server Time:</strong> ${new Date().toISOString()}</p>
+    <h1>🧠 Optimized Brainrot Backend</h1>
+    <p><strong>Active Brainrots:</strong> ${activeCount}/${MAX_BRAINROTS}</p>
+    <p><strong>Active Players:</strong> ${activePlayers.size}/${MAX_PLAYERS}</p>
+    <p><strong>Pending Force-Joins:</strong> ${forceJoinCommands.size}/${MAX_FORCE_JOINS}</p>
     <p><strong>Uptime:</strong> ${Math.floor(process.uptime())} seconds</p>
     <hr>
     <p><a href="/brainrots">📊 View Active Brainrots</a></p>
@@ -353,16 +389,23 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Cleanup task every 2 seconds for snappier removal
+// More frequent cleanup to prevent memory buildup
 setInterval(() => {
   cleanupOldBrainrots();
   cleanupForceJoinCommands();
   cleanupInactivePlayers();
-}, 2000);
+}, 3000); // Every 3 seconds
+
+// Force garbage collection if available
+if (global.gc) {
+  setInterval(() => {
+    global.gc();
+  }, 15000); // Every 15 seconds
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Brainrot Backend Server running on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] ⏱️ Entries expire after 35 seconds`);
-  console.log(`[${new Date().toISOString()}] 🎯 Force-join commands expire after 60 seconds`);
+  console.log(`[${new Date().toISOString()}] 🚀 Optimized Brainrot Backend running on port ${PORT}`);
+  console.log(`[${new Date().toISOString()}] 📊 Memory limits: ${MAX_BRAINROTS} brainrots, ${MAX_PLAYERS} players, ${MAX_FORCE_JOINS} force-joins`);
+  console.log(`[${new Date().toISOString()}] ⏱️ Timeouts: 35s brainrot livetime, 30s heartbeat, 60s force-join`);
 });
