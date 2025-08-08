@@ -2,29 +2,26 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '512kb' })); // Reduced request size limit
+app.use(express.json({ limit: '256kb' })); // Further reduced request size
 
-// Strict memory limits to prevent overload
-const MAX_BRAINROTS = 300;    // Reduced from unlimited to 300
-const MAX_PLAYERS = 150;      // Reduced from unlimited to 150
-const MAX_FORCE_JOINS = 30;   // Reduced from unlimited to 30
+// Ultra-strict memory limits
+const MAX_BRAINROTS = 200;    // Reduced from 300 to 200
+const MAX_PLAYERS = 100;      // Reduced from 150 to 100
 
 // Use Maps for better performance and memory efficiency
 const brainrots = new Map();
 const activePlayers = new Map();
-const forceJoinCommands = new Map();
 
 // Keep your original timeouts
 const BRAINROT_LIVETIME_MS = 35 * 1000; // 35 seconds
 const HEARTBEAT_TIMEOUT_MS = 30 * 1000; // 30 seconds
 const PLAYER_TIMEOUT_MS = 30 * 1000;    // 30 seconds
-const FORCE_JOIN_EXPIRE_MS = 60 * 1000; // 60 seconds
 
 function now() {
   return Date.now();
 }
 
-// Optimized cleanup with size enforcement
+// Ultra-optimized cleanup with size enforcement
 function cleanupInactivePlayers() {
   const nowTime = now();
   const cutoff = nowTime - PLAYER_TIMEOUT_MS;
@@ -48,13 +45,9 @@ function cleanupInactivePlayers() {
       activePlayers.delete(sorted[i][0]);
     }
   }
-  
-  if (expired > 0) {
-    console.log(`[${new Date().toISOString()}] Player cleanup: ${expired} expired, ${activePlayers.size} remaining`);
-  }
 }
 
-// Optimized brainrot cleanup with strict limits
+// Ultra-optimized brainrot cleanup with strict limits
 function cleanupOldBrainrots() {
   const nowTime = now();
   const heartbeatCutoff = nowTime - HEARTBEAT_TIMEOUT_MS;
@@ -90,35 +83,6 @@ function cleanupOldBrainrots() {
     for (let i = 0; i < toRemove; i++) {
       brainrots.delete(sorted[i][0]);
       deleted++;
-    }
-  }
-
-  if (markedInactive > 0 || deleted > 0) {
-    console.log(`[${new Date().toISOString()}] Brainrot cleanup: ${markedInactive} inactive, ${deleted} deleted, ${brainrots.size}/${MAX_BRAINROTS} remaining`);
-  }
-}
-
-// Optimized force join cleanup
-function cleanupForceJoinCommands() {
-  const nowTime = now();
-  const cutoff = nowTime - FORCE_JOIN_EXPIRE_MS;
-  
-  let expired = 0;
-  for (const [username, cmd] of forceJoinCommands) {
-    if (cmd.timestamp < cutoff) {
-      forceJoinCommands.delete(username);
-      expired++;
-    }
-  }
-  
-  // Enforce size limit
-  if (forceJoinCommands.size > MAX_FORCE_JOINS) {
-    const sorted = Array.from(forceJoinCommands.entries())
-      .sort((a, b) => a[1].timestamp - b[1].timestamp);
-    
-    const toRemove = forceJoinCommands.size - MAX_FORCE_JOINS;
-    for (let i = 0; i < toRemove; i++) {
-      forceJoinCommands.delete(sorted[i][0]);
     }
   }
 }
@@ -162,84 +126,7 @@ app.get('/players/active', (req, res) => {
   res.json(players);
 });
 
-// Optimized force join - minimal storage
-app.post('/forcejoin', (req, res) => {
-  const { targetUsernames, placeId, jobId, issuer } = req.body;
-  
-  if (!targetUsernames || !placeId || !jobId) {
-    return res.status(400).json({ error: "Missing targetUsernames, placeId, or jobId" });
-  }
-  
-  const usernames = Array.isArray(targetUsernames) ? targetUsernames : [targetUsernames];
-  
-  usernames.forEach(username => {
-    const user = username.toLowerCase().trim();
-    forceJoinCommands.set(user, {
-      placeId: String(placeId),
-      jobId: String(jobId),
-      timestamp: now(),
-      issuer: issuer || 'admin',
-      executed: false
-    });
-  });
-  
-  cleanupForceJoinCommands();
-  
-  res.json({ 
-    success: true, 
-    message: `Force-join command added for ${usernames.length} user(s)`,
-    expires: new Date(now() + FORCE_JOIN_EXPIRE_MS).toISOString()
-  });
-});
-
-app.get('/forcejoin/:username', (req, res) => {
-  cleanupForceJoinCommands();
-  
-  const username = req.params.username.toLowerCase().trim();
-  const command = forceJoinCommands.get(username);
-  
-  if (command && !command.executed) {
-    command.executed = true;
-    command.executedAt = now();
-    
-    res.json({
-      hasCommand: true,
-      placeId: command.placeId,
-      jobId: command.jobId,
-      issuer: command.issuer
-    });
-  } else {
-    res.json({ hasCommand: false });
-  }
-});
-
-app.get('/forcejoin/status', (req, res) => {
-  cleanupForceJoinCommands();
-  
-  const commands = Array.from(forceJoinCommands.entries()).map(([username, cmd]) => ({
-    username,
-    ...cmd,
-    secondsRemaining: Math.max(0, Math.floor((FORCE_JOIN_EXPIRE_MS - (now() - cmd.timestamp)) / 1000))
-  }));
-  
-  res.json({
-    total: commands.length,
-    commands
-  });
-});
-
-app.delete('/forcejoin/:username', (req, res) => {
-  const username = req.params.username.toLowerCase().trim();
-  
-  if (forceJoinCommands.has(username)) {
-    forceJoinCommands.delete(username);
-    res.json({ success: true, message: `Command cancelled for ${username}` });
-  } else {
-    res.status(404).json({ error: `No command found for ${username}` });
-  }
-});
-
-// Optimized brainrots endpoint - store only essential data
+// Ultra-optimized brainrots endpoint - store only essential data
 app.post('/brainrots', (req, res) => {
   const data = req.body;
 
@@ -251,7 +138,7 @@ app.post('/brainrots', (req, res) => {
     return res.status(400).json({ error: "Missing name, serverId, or jobId" });
   }
 
-  const source = req.ip?.includes('railway') || req.headers['x-forwarded-for']?.includes('railway') ? 'discord-bot' : 'lua-script';
+  const source = req.ip?.includes('railway') || req.headers['x-forwarded-for']?.includes('railway') ? 'bot' : 'lua';
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
   const existing = brainrots.get(key);
 
@@ -274,21 +161,24 @@ app.post('/brainrots', (req, res) => {
   res.json({ success: true });
 });
 
-// Lightweight brainrots getter
+// Ultra-lightweight brainrots getter
 app.get('/brainrots', (req, res) => {
   cleanupOldBrainrots();
 
-  const activeBrainrots = Array.from(brainrots.values())
-    .filter(br => br.active)
-    .map(br => ({
-      name: br.name,
-      serverId: br.serverId,
-      jobId: br.jobId,
-      players: br.players,
-      moneyPerSec: br.moneyPerSec,
-      lastSeen: br.lastSeen,
-      source: br.source
-    }));
+  const activeBrainrots = [];
+  for (const br of brainrots.values()) {
+    if (br.active) {
+      activeBrainrots.push({
+        name: br.name,
+        serverId: br.serverId,
+        jobId: br.jobId,
+        players: br.players,
+        moneyPerSec: br.moneyPerSec,
+        lastSeen: br.lastSeen,
+        source: br.source
+      });
+    }
+  }
 
   res.json(activeBrainrots);
 });
@@ -297,56 +187,74 @@ app.get('/brainrots', (req, res) => {
 app.get('/brainrots/debug', (req, res) => {
   cleanupOldBrainrots();
 
-  const active = Array.from(brainrots.values()).filter(br => br.active);
-  const inactive = Array.from(brainrots.values()).filter(br => !br.active);
+  let activeCount = 0;
+  let inactiveCount = 0;
+  const activeList = [];
+  
+  for (const br of brainrots.values()) {
+    if (br.active) {
+      activeCount++;
+      if (activeList.length < 10) {
+        activeList.push({
+          name: br.name,
+          serverId: br.serverId.substring(0, 8) + '...',
+          jobId: br.jobId.substring(0, 8) + '...',
+          players: br.players,
+          moneyPerSec: br.moneyPerSec,
+          secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000)
+        });
+      }
+    } else {
+      inactiveCount++;
+    }
+  }
 
   const debugData = {
     summary: {
       totalStored: brainrots.size,
-      activeCount: active.length,
-      inactiveCount: inactive.length,
+      activeCount: activeCount,
+      inactiveCount: inactiveCount,
       limits: {
         maxBrainrots: MAX_BRAINROTS,
-        maxPlayers: MAX_PLAYERS,
-        maxForceJoins: MAX_FORCE_JOINS
+        maxPlayers: MAX_PLAYERS
       }
     },
-    active: active.slice(0, 10).map(br => ({
-      name: br.name,
-      serverId: br.serverId.substring(0, 8) + '...',
-      jobId: br.jobId.substring(0, 8) + '...',
-      players: br.players,
-      moneyPerSec: br.moneyPerSec,
-      secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000)
-    }))
+    active: activeList
   };
 
   res.json(debugData);
 });
 
-// Lightweight stats endpoint
+// Ultra-lightweight stats endpoint
 app.get('/brainrots/stats', (req, res) => {
-  const active = Array.from(brainrots.values()).filter(br => br.active);
-  const bySource = active.reduce((acc, br) => {
-    acc[br.source] = (acc[br.source] || 0) + 1;
-    return acc;
-  }, {});
+  let activeCount = 0;
+  let luaCount = 0;
+  let botCount = 0;
+  
+  for (const br of brainrots.values()) {
+    if (br.active) {
+      activeCount++;
+      if (br.source === 'lua') luaCount++;
+      else if (br.source === 'bot') botCount++;
+    }
+  }
 
   res.json({
-    totalActive: active.length,
+    totalActive: activeCount,
     totalPlayers: activePlayers.size,
-    totalForceJoins: forceJoinCommands.size,
-    bySource,
+    bySource: {
+      lua: luaCount,
+      bot: botCount
+    },
     uptime: Math.floor(process.uptime()),
     limits: {
       brainrots: `${brainrots.size}/${MAX_BRAINROTS}`,
-      players: `${activePlayers.size}/${MAX_PLAYERS}`,
-      forceJoins: `${forceJoinCommands.size}/${MAX_FORCE_JOINS}`
+      players: `${activePlayers.size}/${MAX_PLAYERS}`
     }
   });
 });
 
-// Admin cleanup endpoints
+// Essential admin endpoints only
 app.delete('/brainrots', (req, res) => {
   const count = brainrots.size;
   brainrots.clear();
@@ -370,42 +278,42 @@ app.patch('/brainrots/leave', (req, res) => {
   res.json({ success: true });
 });
 
-// Minimal health check
+// Ultra-minimal health check
 app.get('/', (req, res) => {
-  const activeCount = Array.from(brainrots.values()).filter(br => br.active).length;
+  let activeCount = 0;
+  for (const br of brainrots.values()) {
+    if (br.active) activeCount++;
+  }
   
   res.send(`
-    <h1>🧠 Optimized Brainrot Backend</h1>
+    <h1>🧠 Ultra-Optimized Brainrot Backend</h1>
     <p><strong>Active Brainrots:</strong> ${activeCount}/${MAX_BRAINROTS}</p>
     <p><strong>Active Players:</strong> ${activePlayers.size}/${MAX_PLAYERS}</p>
-    <p><strong>Pending Force-Joins:</strong> ${forceJoinCommands.size}/${MAX_FORCE_JOINS}</p>
     <p><strong>Uptime:</strong> ${Math.floor(process.uptime())} seconds</p>
     <hr>
     <p><a href="/brainrots">📊 View Active Brainrots</a></p>
     <p><a href="/players/active">👥 View Active Players</a></p>
     <p><a href="/brainrots/debug">🔍 Debug Data</a></p>
     <p><a href="/brainrots/stats">📈 Statistics</a></p>
-    <p><a href="/forcejoin/status">🎯 Force-Join Status</a></p>
   `);
 });
 
-// More frequent cleanup to prevent memory buildup
+// Aggressive cleanup to prevent memory buildup
 setInterval(() => {
   cleanupOldBrainrots();
-  cleanupForceJoinCommands();
   cleanupInactivePlayers();
-}, 3000); // Every 3 seconds
+}, 2000); // Every 2 seconds
 
 // Force garbage collection if available
 if (global.gc) {
   setInterval(() => {
     global.gc();
-  }, 15000); // Every 15 seconds
+  }, 10000); // Every 10 seconds
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Optimized Brainrot Backend running on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] 📊 Memory limits: ${MAX_BRAINROTS} brainrots, ${MAX_PLAYERS} players, ${MAX_FORCE_JOINS} force-joins`);
-  console.log(`[${new Date().toISOString()}] ⏱️ Timeouts: 35s brainrot livetime, 30s heartbeat, 60s force-join`);
+  console.log(`[${new Date().toISOString()}] 🚀 Ultra-Optimized Brainrot Backend running on port ${PORT}`);
+  console.log(`[${new Date().toISOString()}] 📊 Memory limits: ${MAX_BRAINROTS} brainrots, ${MAX_PLAYERS} players`);
+  console.log(`[${new Date().toISOString()}] ⏱️ Timeouts: 35s brainrot livetime, 30s heartbeat`);
 });
