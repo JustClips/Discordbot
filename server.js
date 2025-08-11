@@ -7,38 +7,41 @@ const app = express();
 // Enable compression first
 app.use(compression());
 
-// Rate limiting configurations
+// More reasonable rate limiting
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 30, // Limit each IP to 30 requests per windowMs
+  max: 120, // Increased to 120 requests per minute per IP
   message: { error: 'Too many requests from this IP' },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req, res) => {
+    // Skip rate limiting for Railway/internal requests
+    const ip = req.ip || req.connection.remoteAddress;
+    return ip.includes('railway') || ip.includes('localhost');
+  }
 });
 
 const strictLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 15, // Even stricter for sensitive endpoints
+  max: 30, // Stricter for admin endpoints
   message: { error: 'Too many requests from this IP' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 app.use(cors());
-app.use(express.json({ limit: '128kb' })); // Reduced from 256kb
+app.use(express.json({ limit: '128kb' }));
 
 // Ultra-strict memory limits
-const MAX_BRAINROTS = 150;    // Reduced from 200
-const MAX_PLAYERS = 75;       // Reduced from 100
+const MAX_BRAINROTS = 150;
+const MAX_PLAYERS = 75;
 
-// Use Maps for better performance and memory efficiency
 const brainrots = new Map();
 const activePlayers = new Map();
 
-// Keep your original timeouts
-const BRAINROT_LIVETIME_MS = 35 * 1000; // 35 seconds
-const HEARTBEAT_TIMEOUT_MS = 30 * 1000; // 30 seconds
-const PLAYER_TIMEOUT_MS = 30 * 1000;    // 30 seconds
+const BRAINROT_LIVETIME_MS = 35 * 1000;
+const HEARTBEAT_TIMEOUT_MS = 30 * 1000;
+const PLAYER_TIMEOUT_MS = 30 * 1000;
 
 function now() {
   return Date.now();
@@ -54,12 +57,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Ultra-optimized cleanup with size enforcement
 function cleanupInactivePlayers() {
   const nowTime = now();
   const cutoff = nowTime - PLAYER_TIMEOUT_MS;
   
-  // Remove expired players
   let expired = 0;
   for (const [key, player] of activePlayers) {
     if (player.lastSeen < cutoff) {
@@ -68,7 +69,6 @@ function cleanupInactivePlayers() {
     }
   }
   
-  // Enforce size limit - remove oldest if over limit
   if (activePlayers.size > MAX_PLAYERS) {
     const sorted = Array.from(activePlayers.entries())
       .sort((a, b) => a[1].lastSeen - b[1].lastSeen);
@@ -80,7 +80,6 @@ function cleanupInactivePlayers() {
   }
 }
 
-// Ultra-optimized brainrot cleanup with strict limits
 function cleanupOldBrainrots() {
   const nowTime = now();
   const heartbeatCutoff = nowTime - HEARTBEAT_TIMEOUT_MS;
@@ -89,7 +88,6 @@ function cleanupOldBrainrots() {
   let markedInactive = 0;
   let deleted = 0;
 
-  // Mark inactive and delete expired
   for (const [key, br] of brainrots) {
     if (br.active && br.lastSeen < heartbeatCutoff) {
       br.active = false;
@@ -101,11 +99,9 @@ function cleanupOldBrainrots() {
     }
   }
 
-  // Enforce strict size limit
   if (brainrots.size > MAX_BRAINROTS) {
     const sorted = Array.from(brainrots.entries())
       .sort((a, b) => {
-        // Prioritize removing inactive first, then oldest
         if (a[1].active !== b[1].active) {
           return a[1].active ? 1 : -1;
         }
@@ -120,7 +116,7 @@ function cleanupOldBrainrots() {
   }
 }
 
-// Minimal player heartbeat - store only essential data
+// Apply rate limiting only to specific endpoints
 app.post('/players/heartbeat', apiLimiter, (req, res) => {
   const { username, serverId, jobId, placeId } = req.body;
   
@@ -130,7 +126,6 @@ app.post('/players/heartbeat', apiLimiter, (req, res) => {
   
   const key = `${username.toLowerCase()}_${serverId}_${jobId}`;
   
-  // Store minimal data only
   activePlayers.set(key, {
     username: username,
     serverId: serverId,
@@ -144,7 +139,6 @@ app.post('/players/heartbeat', apiLimiter, (req, res) => {
   res.json({ success: true });
 });
 
-// Lightweight active players endpoint with ETags
 app.get('/players/active', apiLimiter, (req, res) => {
   cleanupInactivePlayers();
   
@@ -166,7 +160,6 @@ app.get('/players/active', apiLimiter, (req, res) => {
   res.json(players);
 });
 
-// Ultra-optimized brainrots endpoint - store only essential data
 app.post('/brainrots', apiLimiter, (req, res) => {
   const data = req.body;
 
@@ -182,7 +175,6 @@ app.post('/brainrots', apiLimiter, (req, res) => {
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
   const existing = brainrots.get(key);
 
-  // Store only essential data to minimize memory usage
   const entry = {
     n: name,
     s: serverId,
@@ -201,8 +193,7 @@ app.post('/brainrots', apiLimiter, (req, res) => {
   res.json({ success: true });
 });
 
-// Ultra-lightweight brainrots getter with ETags and minified response
-app.get('/brainrots', apiLimiter, (req, res) => {
+app.get('/brainrots', (req, res) => {  // Removed rate limiting from this endpoint
   cleanupOldBrainrots();
 
   const activeBrainrots = [];
@@ -230,7 +221,6 @@ app.get('/brainrots', apiLimiter, (req, res) => {
   res.json(activeBrainrots);
 });
 
-// Minimal debug endpoint
 app.get('/brainrots/debug', strictLimiter, (req, res) => {
   cleanupOldBrainrots();
 
@@ -272,7 +262,6 @@ app.get('/brainrots/debug', strictLimiter, (req, res) => {
   res.json(debugData);
 });
 
-// Ultra-lightweight stats endpoint
 app.get('/brainrots/stats', apiLimiter, (req, res) => {
   let activeCount = 0;
   let luaCount = 0;
@@ -301,7 +290,6 @@ app.get('/brainrots/stats', apiLimiter, (req, res) => {
   });
 });
 
-// Essential admin endpoints only
 app.delete('/brainrots', strictLimiter, (req, res) => {
   const count = brainrots.size;
   brainrots.clear();
@@ -325,7 +313,6 @@ app.patch('/brainrots/leave', apiLimiter, (req, res) => {
   res.json({ success: true });
 });
 
-// Ultra-minimal health check
 app.get('/', (req, res) => {
   let activeCount = 0;
   for (const br of brainrots.values()) {
@@ -345,17 +332,15 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Aggressive cleanup to prevent memory buildup
 setInterval(() => {
   cleanupOldBrainrots();
   cleanupInactivePlayers();
-}, 5000); // Every 5 seconds (increased from 2s)
+}, 5000);
 
-// Force garbage collection if available
 if (global.gc) {
   setInterval(() => {
     global.gc();
-  }, 15000); // Every 15 seconds (increased from 10s)
+  }, 15000);
 }
 
 const PORT = process.env.PORT || 3000;
