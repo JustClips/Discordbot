@@ -1,12 +1,35 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const app = express();
+
+// Enable compression first
+app.use(compression());
+
+// Rate limiting configurations
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 30, // Limit each IP to 30 requests per windowMs
+  message: { error: 'Too many requests from this IP' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const strictLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 15, // Even stricter for sensitive endpoints
+  message: { error: 'Too many requests from this IP' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use(cors());
-app.use(express.json({ limit: '256kb' })); // Further reduced request size
+app.use(express.json({ limit: '128kb' })); // Reduced from 256kb
 
 // Ultra-strict memory limits
-const MAX_BRAINROTS = 200;    // Reduced from 300 to 200
-const MAX_PLAYERS = 100;      // Reduced from 150 to 100
+const MAX_BRAINROTS = 150;    // Reduced from 200
+const MAX_PLAYERS = 75;       // Reduced from 100
 
 // Use Maps for better performance and memory efficiency
 const brainrots = new Map();
@@ -20,6 +43,16 @@ const PLAYER_TIMEOUT_MS = 30 * 1000;    // 30 seconds
 function now() {
   return Date.now();
 }
+
+// Traffic logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} - ${res.statusCode} - ${duration}ms - ${res.get('Content-Length') || 0} bytes`);
+  });
+  next();
+});
 
 // Ultra-optimized cleanup with size enforcement
 function cleanupInactivePlayers() {
@@ -88,7 +121,7 @@ function cleanupOldBrainrots() {
 }
 
 // Minimal player heartbeat - store only essential data
-app.post('/players/heartbeat', (req, res) => {
+app.post('/players/heartbeat', apiLimiter, (req, res) => {
   const { username, serverId, jobId, placeId } = req.body;
   
   if (!username || !serverId || !jobId) {
@@ -111,23 +144,30 @@ app.post('/players/heartbeat', (req, res) => {
   res.json({ success: true });
 });
 
-// Lightweight active players endpoint
-app.get('/players/active', (req, res) => {
+// Lightweight active players endpoint with ETags
+app.get('/players/active', apiLimiter, (req, res) => {
   cleanupInactivePlayers();
   
   const players = Array.from(activePlayers.values()).map(player => ({
-    username: player.username,
-    serverId: player.serverId,
-    jobId: player.jobId,
-    placeId: player.placeId,
-    secondsSinceLastSeen: Math.floor((now() - player.lastSeen) / 1000)
+    u: player.username,
+    s: player.serverId,
+    j: player.jobId,
+    p: player.placeId,
+    t: Math.floor((now() - player.lastSeen) / 1000)
   }));
+  
+  const hash = require('crypto').createHash('md5').update(JSON.stringify(players)).digest('hex');
+  res.set('ETag', `"${hash}"`);
+  
+  if (req.headers['if-none-match'] === `"${hash}"`) {
+    return res.status(304).end();
+  }
   
   res.json(players);
 });
 
 // Ultra-optimized brainrots endpoint - store only essential data
-app.post('/brainrots', (req, res) => {
+app.post('/brainrots', apiLimiter, (req, res) => {
   const data = req.body;
 
   let name = typeof data.name === "string" ? data.name.trim() : "";
@@ -144,15 +184,15 @@ app.post('/brainrots', (req, res) => {
 
   // Store only essential data to minimize memory usage
   const entry = {
-    name: name,
-    serverId: serverId,
-    jobId: jobId,
-    players: data.players,
-    moneyPerSec: data.moneyPerSec,
-    lastSeen: now(),
-    active: true,
-    source: source,
-    firstSeen: existing?.firstSeen || now()
+    n: name,
+    s: serverId,
+    j: jobId,
+    p: data.players,
+    m: data.moneyPerSec,
+    t: now(),
+    a: true,
+    src: source,
+    f: existing?.f || now()
   };
 
   brainrots.set(key, entry);
@@ -161,30 +201,37 @@ app.post('/brainrots', (req, res) => {
   res.json({ success: true });
 });
 
-// Ultra-lightweight brainrots getter
-app.get('/brainrots', (req, res) => {
+// Ultra-lightweight brainrots getter with ETags and minified response
+app.get('/brainrots', apiLimiter, (req, res) => {
   cleanupOldBrainrots();
 
   const activeBrainrots = [];
   for (const br of brainrots.values()) {
-    if (br.active) {
+    if (br.a) {
       activeBrainrots.push({
-        name: br.name,
-        serverId: br.serverId,
-        jobId: br.jobId,
-        players: br.players,
-        moneyPerSec: br.moneyPerSec,
-        lastSeen: br.lastSeen,
-        source: br.source
+        n: br.n,
+        s: br.s,
+        j: br.j,
+        p: br.p,
+        m: br.m,
+        t: br.t,
+        src: br.src
       });
     }
+  }
+
+  const hash = require('crypto').createHash('md5').update(JSON.stringify(activeBrainrots)).digest('hex');
+  res.set('ETag', `"${hash}"`);
+  
+  if (req.headers['if-none-match'] === `"${hash}"`) {
+    return res.status(304).end();
   }
 
   res.json(activeBrainrots);
 });
 
 // Minimal debug endpoint
-app.get('/brainrots/debug', (req, res) => {
+app.get('/brainrots/debug', strictLimiter, (req, res) => {
   cleanupOldBrainrots();
 
   let activeCount = 0;
@@ -192,16 +239,16 @@ app.get('/brainrots/debug', (req, res) => {
   const activeList = [];
   
   for (const br of brainrots.values()) {
-    if (br.active) {
+    if (br.a) {
       activeCount++;
       if (activeList.length < 10) {
         activeList.push({
-          name: br.name,
-          serverId: br.serverId.substring(0, 8) + '...',
-          jobId: br.jobId.substring(0, 8) + '...',
-          players: br.players,
-          moneyPerSec: br.moneyPerSec,
-          secondsSinceLastSeen: Math.floor((now() - br.lastSeen) / 1000)
+          n: br.n,
+          s: br.s.substring(0, 8) + '...',
+          j: br.j.substring(0, 8) + '...',
+          p: br.p,
+          m: br.m,
+          t: Math.floor((now() - br.t) / 1000)
         });
       }
     } else {
@@ -210,58 +257,58 @@ app.get('/brainrots/debug', (req, res) => {
   }
 
   const debugData = {
-    summary: {
-      totalStored: brainrots.size,
-      activeCount: activeCount,
-      inactiveCount: inactiveCount,
-      limits: {
-        maxBrainrots: MAX_BRAINROTS,
-        maxPlayers: MAX_PLAYERS
+    s: {
+      t: brainrots.size,
+      a: activeCount,
+      i: inactiveCount,
+      l: {
+        b: MAX_BRAINROTS,
+        p: MAX_PLAYERS
       }
     },
-    active: activeList
+    a: activeList
   };
 
   res.json(debugData);
 });
 
 // Ultra-lightweight stats endpoint
-app.get('/brainrots/stats', (req, res) => {
+app.get('/brainrots/stats', apiLimiter, (req, res) => {
   let activeCount = 0;
   let luaCount = 0;
   let botCount = 0;
   
   for (const br of brainrots.values()) {
-    if (br.active) {
+    if (br.a) {
       activeCount++;
-      if (br.source === 'lua') luaCount++;
-      else if (br.source === 'bot') botCount++;
+      if (br.src === 'lua') luaCount++;
+      else if (br.src === 'bot') botCount++;
     }
   }
 
   res.json({
-    totalActive: activeCount,
-    totalPlayers: activePlayers.size,
-    bySource: {
-      lua: luaCount,
-      bot: botCount
+    t: activeCount,
+    p: activePlayers.size,
+    b: {
+      l: luaCount,
+      b: botCount
     },
-    uptime: Math.floor(process.uptime()),
-    limits: {
-      brainrots: `${brainrots.size}/${MAX_BRAINROTS}`,
-      players: `${activePlayers.size}/${MAX_PLAYERS}`
+    u: Math.floor(process.uptime()),
+    l: {
+      b: `${brainrots.size}/${MAX_BRAINROTS}`,
+      p: `${activePlayers.size}/${MAX_PLAYERS}`
     }
   });
 });
 
 // Essential admin endpoints only
-app.delete('/brainrots', (req, res) => {
+app.delete('/brainrots', strictLimiter, (req, res) => {
   const count = brainrots.size;
   brainrots.clear();
-  res.json({ success: true, cleared: count });
+  res.json({ success: true, c: count });
 });
 
-app.patch('/brainrots/leave', (req, res) => {
+app.patch('/brainrots/leave', apiLimiter, (req, res) => {
   let { name, serverId, jobId } = req.body;
   name = typeof name === "string" ? name.trim() : "";
   serverId = typeof serverId === "string" ? serverId.trim() : "";
@@ -271,8 +318,8 @@ app.patch('/brainrots/leave', (req, res) => {
   const entry = brainrots.get(key);
   
   if (entry) {
-    entry.active = false;
-    entry.lastSeen = now();
+    entry.a = false;
+    entry.t = now();
   }
 
   res.json({ success: true });
@@ -282,7 +329,7 @@ app.patch('/brainrots/leave', (req, res) => {
 app.get('/', (req, res) => {
   let activeCount = 0;
   for (const br of brainrots.values()) {
-    if (br.active) activeCount++;
+    if (br.a) activeCount++;
   }
   
   res.send(`
@@ -302,13 +349,13 @@ app.get('/', (req, res) => {
 setInterval(() => {
   cleanupOldBrainrots();
   cleanupInactivePlayers();
-}, 2000); // Every 2 seconds
+}, 5000); // Every 5 seconds (increased from 2s)
 
 // Force garbage collection if available
 if (global.gc) {
   setInterval(() => {
     global.gc();
-  }, 10000); // Every 10 seconds
+  }, 15000); // Every 15 seconds (increased from 10s)
 }
 
 const PORT = process.env.PORT || 3000;
