@@ -2,20 +2,23 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '256kb' })); // Further reduced request size
+app.use(express.json({ limit: '256kb' }));
 
 // Ultra-strict memory limits
-const MAX_BRAINROTS = 200;    // Reduced from 300 to 200
-const MAX_PLAYERS = 100;      // Reduced from 150 to 100
+const MAX_BRAINROTS = 50;     // Reduced from 200 to 50
+const MAX_PLAYERS = 100;
 
 // Use Maps for better performance and memory efficiency
 const brainrots = new Map();
 const activePlayers = new Map();
 
 // Keep your original timeouts
-const BRAINROT_LIVETIME_MS = 35 * 1000; // 35 seconds
+const BRAINROT_LIVETIME_MS = 30 * 1000; // 30 seconds
 const HEARTBEAT_TIMEOUT_MS = 30 * 1000; // 30 seconds
 const PLAYER_TIMEOUT_MS = 30 * 1000;    // 30 seconds
+
+// Limit for response size
+const MAX_RESPONSE_BRAINROTS = 20; // Only send top 20 brainrots
 
 function now() {
   return Date.now();
@@ -47,22 +50,16 @@ function cleanupInactivePlayers() {
   }
 }
 
-// Ultra-optimized brainrot cleanup with strict limits
+// Ultra-optimized brainrot cleanup - DELETE AFTER 30 SECONDS
 function cleanupOldBrainrots() {
   const nowTime = now();
-  const heartbeatCutoff = nowTime - HEARTBEAT_TIMEOUT_MS;
   const livetimeCutoff = nowTime - BRAINROT_LIVETIME_MS;
 
-  let markedInactive = 0;
   let deleted = 0;
 
-  // Mark inactive and delete expired
+  // DELETE ALL expired brainrots
   for (const [key, br] of brainrots) {
-    if (br.active && br.lastSeen < heartbeatCutoff) {
-      br.active = false;
-      markedInactive++;
-    }
-    if (!br.active && br.lastSeen < livetimeCutoff) {
+    if (br.lastSeen < livetimeCutoff) {
       brainrots.delete(key);
       deleted++;
     }
@@ -71,13 +68,7 @@ function cleanupOldBrainrots() {
   // Enforce strict size limit
   if (brainrots.size > MAX_BRAINROTS) {
     const sorted = Array.from(brainrots.entries())
-      .sort((a, b) => {
-        // Prioritize removing inactive first, then oldest
-        if (a[1].active !== b[1].active) {
-          return a[1].active ? 1 : -1;
-        }
-        return a[1].lastSeen - b[1].lastSeen;
-      });
+      .sort((a, b) => b[1].lastSeen - a[1].lastSeen); // Sort by newest first
     
     const toRemove = brainrots.size - MAX_BRAINROTS;
     for (let i = 0; i < toRemove; i++) {
@@ -115,7 +106,11 @@ app.post('/players/heartbeat', (req, res) => {
 app.get('/players/active', (req, res) => {
   cleanupInactivePlayers();
   
-  const players = Array.from(activePlayers.values()).map(player => ({
+  // Limit response size
+  const allPlayers = Array.from(activePlayers.values());
+  const limitedPlayers = allPlayers.slice(0, 50); // Limit to 50 players
+  
+  const players = limitedPlayers.map(player => ({
     username: player.username,
     serverId: player.serverId,
     jobId: player.jobId,
@@ -126,7 +121,7 @@ app.get('/players/active', (req, res) => {
   res.json(players);
 });
 
-// Ultra-optimized brainrots endpoint - store only essential data
+// Brainrots endpoint - brainrots auto-delete after 30 seconds
 app.post('/brainrots', (req, res) => {
   const data = req.body;
 
@@ -140,9 +135,8 @@ app.post('/brainrots', (req, res) => {
 
   const source = req.ip?.includes('railway') || req.headers['x-forwarded-for']?.includes('railway') ? 'bot' : 'lua';
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
-  const existing = brainrots.get(key);
 
-  // Store only essential data to minimize memory usage
+  // Store data - brainrots will be deleted after 30 seconds
   const entry = {
     name: name,
     serverId: serverId,
@@ -151,8 +145,7 @@ app.post('/brainrots', (req, res) => {
     moneyPerSec: data.moneyPerSec,
     lastSeen: now(),
     active: true,
-    source: source,
-    firstSeen: existing?.firstSeen || now()
+    source: source
   };
 
   brainrots.set(key, entry);
@@ -161,13 +154,16 @@ app.post('/brainrots', (req, res) => {
   res.json({ success: true });
 });
 
-// Ultra-lightweight brainrots getter
+// Ultra-lightweight brainrots getter - LIMIT RESPONSE SIZE
 app.get('/brainrots', (req, res) => {
   cleanupOldBrainrots();
 
   const activeBrainrots = [];
+  const cutoff = now() - BRAINROT_LIVETIME_MS;
+  
   for (const br of brainrots.values()) {
-    if (br.active) {
+    // Only return brainrots that are still within 30 seconds
+    if (br.lastSeen >= cutoff) {
       activeBrainrots.push({
         name: br.name,
         serverId: br.serverId,
@@ -180,7 +176,11 @@ app.get('/brainrots', (req, res) => {
     }
   }
 
-  res.json(activeBrainrots);
+  // SORT by newest first and LIMIT response size
+  activeBrainrots.sort((a, b) => b.lastSeen - a.lastSeen);
+  const limitedBrainrots = activeBrainrots.slice(0, MAX_RESPONSE_BRAINROTS);
+
+  res.json(limitedBrainrots);
 });
 
 // Minimal debug endpoint
@@ -188,13 +188,15 @@ app.get('/brainrots/debug', (req, res) => {
   cleanupOldBrainrots();
 
   let activeCount = 0;
-  let inactiveCount = 0;
+  let expiredCount = 0;
   const activeList = [];
   
+  const cutoff = now() - BRAINROT_LIVETIME_MS;
+  
   for (const br of brainrots.values()) {
-    if (br.active) {
+    if (br.lastSeen >= cutoff) {
       activeCount++;
-      if (activeList.length < 10) {
+      if (activeList.length < 5) { // Reduced from 10 to 5
         activeList.push({
           name: br.name,
           serverId: br.serverId.substring(0, 8) + '...',
@@ -205,7 +207,7 @@ app.get('/brainrots/debug', (req, res) => {
         });
       }
     } else {
-      inactiveCount++;
+      expiredCount++;
     }
   }
 
@@ -213,7 +215,7 @@ app.get('/brainrots/debug', (req, res) => {
     summary: {
       totalStored: brainrots.size,
       activeCount: activeCount,
-      inactiveCount: inactiveCount,
+      expiredCount: expiredCount,
       limits: {
         maxBrainrots: MAX_BRAINROTS,
         maxPlayers: MAX_PLAYERS
@@ -231,8 +233,10 @@ app.get('/brainrots/stats', (req, res) => {
   let luaCount = 0;
   let botCount = 0;
   
+  const cutoff = now() - BRAINROT_LIVETIME_MS;
+  
   for (const br of brainrots.values()) {
-    if (br.active) {
+    if (br.lastSeen >= cutoff) {
       activeCount++;
       if (br.source === 'lua') luaCount++;
       else if (br.source === 'bot') botCount++;
@@ -268,12 +272,7 @@ app.patch('/brainrots/leave', (req, res) => {
   jobId = typeof jobId === "string" ? jobId.trim() : "";
 
   const key = `${serverId}_${name.toLowerCase()}_${jobId}`;
-  const entry = brainrots.get(key);
-  
-  if (entry) {
-    entry.active = false;
-    entry.lastSeen = now();
-  }
+  brainrots.delete(key);
 
   res.json({ success: true });
 });
@@ -281,8 +280,10 @@ app.patch('/brainrots/leave', (req, res) => {
 // Ultra-minimal health check
 app.get('/', (req, res) => {
   let activeCount = 0;
+  const cutoff = now() - BRAINROT_LIVETIME_MS;
+  
   for (const br of brainrots.values()) {
-    if (br.active) activeCount++;
+    if (br.lastSeen >= cutoff) activeCount++;
   }
   
   res.send(`
@@ -302,18 +303,19 @@ app.get('/', (req, res) => {
 setInterval(() => {
   cleanupOldBrainrots();
   cleanupInactivePlayers();
-}, 2000); // Every 2 seconds
+}, 2000);
 
 // Force garbage collection if available
 if (global.gc) {
   setInterval(() => {
     global.gc();
-  }, 10000); // Every 10 seconds
+  }, 10000);
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] 🚀 Ultra-Optimized Brainrot Backend running on port ${PORT}`);
   console.log(`[${new Date().toISOString()}] 📊 Memory limits: ${MAX_BRAINROTS} brainrots, ${MAX_PLAYERS} players`);
-  console.log(`[${new Date().toISOString()}] ⏱️ Timeouts: 35s brainrot livetime, 30s heartbeat`);
+  console.log(`[${new Date().toISOString()}] ⏱️ Timeouts: 30s brainrot lifetime, 30s heartbeat`);
+  console.log(`[${new Date().toISOString()}] 📈 Response limits: ${MAX_RESPONSE_BRAINROTS} brainrots per request`);
 });
